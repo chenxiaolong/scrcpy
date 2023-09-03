@@ -154,6 +154,9 @@ struct scrcpy_options {
     uint32_t display_id;
     const char* camera_id;
     enum sc_camera_position camera_position;
+    uint16_t camera_width;
+    uint16_t camera_height;
+    uint16_t camera_fps;
     sc_tick display_buffer;
     sc_tick audio_buffer;
     sc_tick audio_output_buffer;

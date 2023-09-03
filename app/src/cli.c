@@ -35,6 +35,9 @@ enum {
     OPT_DISPLAY_ID,
     OPT_CAMERA_ID,
     OPT_CAMERA_POSITION,
+    OPT_CAMERA_WIDTH,
+    OPT_CAMERA_HEIGHT,
+    OPT_CAMERA_FPS,
     OPT_ROTATION,
     OPT_RENDER_DRIVER,
     OPT_NO_MIPMAPS,
@@ -267,6 +270,24 @@ static const struct sc_option options[] = {
         .text = "Select the device camera to mirror by its physical position when using --video-source=camera.\n"
                 "Valid values are: all, front, back, external\n"
                 "Default is all.",
+    },
+    {
+        .longopt_id = OPT_CAMERA_WIDTH,
+        .longopt = "camera-width",
+        .argdesc = "value",
+        .text = "Specify the camera capture resolution's width when using --video-source=camera.",
+    },
+    {
+        .longopt_id = OPT_CAMERA_HEIGHT,
+        .longopt = "camera-height",
+        .argdesc = "value",
+        .text = "Specify the camera capture resolution's width when using --video-source=camera.",
+    },
+    {
+        .longopt_id = OPT_CAMERA_FPS,
+        .longopt = "camera-fps",
+        .argdesc = "value",
+        .text = "Specify the camera capture frame rate when using --video-source=camera.",
     },
     {
         .longopt_id = OPT_DISPLAY_BUFFER,
@@ -1702,6 +1723,32 @@ parse_camera_position(const char *optarg, enum sc_camera_position *position) {
 }
 
 static bool
+parse_camera_dimension(const char *s, uint16_t *dimension) {
+    long value;
+    bool ok = parse_integer_arg(s, &value, false, 0, 0xFFFF,
+                                "camera dimension");
+    if (!ok) {
+        return false;
+    }
+
+    *dimension = (uint16_t) value;
+    return true;
+}
+
+static bool
+parse_camera_fps(const char *s, uint16_t *fps) {
+    long value;
+    bool ok = parse_integer_arg(s, &value, false, 0, 0xFFFF,
+                                "camera fps");
+    if (!ok) {
+        return false;
+    }
+
+    *fps = (uint16_t) value;
+    return true;
+}
+
+static bool
 parse_time_limit(const char *s, sc_tick *tick) {
     long value;
     bool ok = parse_integer_arg(s, &value, false, 0, 0x7FFFFFFF, "time limit");
@@ -1747,6 +1794,21 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
                 break;
             case OPT_CAMERA_ID:
                 opts->camera_id = optarg;
+                break;
+            case OPT_CAMERA_WIDTH:
+                if (!parse_camera_dimension(optarg, &opts->camera_width)) {
+                    return false;
+                }
+                break;
+            case OPT_CAMERA_HEIGHT:
+                if (!parse_camera_dimension(optarg, &opts->camera_height)) {
+                    return false;
+                }
+                break;
+            case OPT_CAMERA_FPS:
+                if (!parse_camera_fps(optarg, &opts->camera_fps)) {
+                    return false;
+                }
                 break;
             case OPT_CAMERA_POSITION:
                 if (!parse_camera_position(optarg, &opts->camera_position)) {

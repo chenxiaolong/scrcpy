@@ -293,6 +293,15 @@ execute_server(struct sc_server *server,
                 break;
         }
     }
+    if (params->camera_width) {
+        ADD_PARAM("camera_width=%" PRIu16, params->camera_width);
+    }
+    if (params->camera_height) {
+        ADD_PARAM("camera_height=%" PRIu16, params->camera_height);
+    }
+    if (params->camera_fps) {
+        ADD_PARAM("camera_fps=%" PRIu16, params->camera_fps);
+    }
     if (params->show_touches) {
         ADD_PARAM("show_touches=true");
     }

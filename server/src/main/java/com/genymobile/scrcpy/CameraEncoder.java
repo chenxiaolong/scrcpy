@@ -6,14 +6,19 @@ import android.graphics.Rect;
 import android.hardware.camera2.CameraAccessException;
 import android.hardware.camera2.CameraCaptureSession;
 import android.hardware.camera2.CameraCharacteristics;
+import android.hardware.camera2.CameraConstrainedHighSpeedCaptureSession;
 import android.hardware.camera2.CameraDevice;
+import android.hardware.camera2.CameraManager;
 import android.hardware.camera2.CaptureFailure;
 import android.hardware.camera2.CaptureRequest;
+import android.hardware.camera2.params.OutputConfiguration;
+import android.hardware.camera2.params.SessionConfiguration;
 import android.hardware.camera2.params.StreamConfigurationMap;
 import android.media.MediaCodec;
 import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.util.Range;
 import android.view.Surface;
 
 import java.util.Arrays;
@@ -22,29 +27,103 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executor;
 
 public class CameraEncoder extends SurfaceEncoder {
 
     private final String cameraId;
-    private final CameraPosition cameraPosition;
+    private final int cameraWidth;
+    private final int cameraHeight;
+    private final int cameraFps;
+    private final boolean isHighSpeed;
 
     private int maxSize;
-    private String actualCameraId;
     private CameraDevice cameraDevice;
 
     private final Handler cameraHandler;
+    private final Executor cameraExecutor;
 
-    public CameraEncoder(int maxSize, String cameraId, CameraPosition cameraPosition, Streamer streamer,
-                         int videoBitRate, int maxFps, List<CodecOption> codecOptions, String encoderName, boolean downsizeOnError) {
+    public CameraEncoder(int maxSize, String cameraId, CameraPosition cameraPosition,
+                         int cameraWidth, int cameraHeight, int cameraFps, Streamer streamer,
+                         int videoBitRate, int maxFps, List<CodecOption> codecOptions, String encoderName, boolean downsizeOnError)
+            throws ConfigurationException {
         super(streamer, videoBitRate, maxFps, codecOptions, encoderName, downsizeOnError);
 
         this.maxSize = maxSize;
-        this.cameraId = cameraId;
-        this.cameraPosition = cameraPosition;
+        this.cameraId = findCameraId(cameraId, cameraPosition);
+        this.cameraWidth = cameraWidth;
+        this.cameraHeight = cameraHeight;
+        this.cameraFps = cameraFps;
+        this.isHighSpeed = isHighSpeed(cameraId, cameraFps);
 
         HandlerThread cameraThread = new HandlerThread("camera");
         cameraThread.start();
         cameraHandler = new Handler(cameraThread.getLooper());
+        cameraExecutor = new HandlerExecutor(cameraHandler);
+    }
+
+    private static String findCameraId(String id, CameraPosition position) throws ConfigurationException {
+        if (id != null) {
+            if (position.matches(id)) {
+                return id;
+            }
+
+            Ln.e(String.format("--camera=%s doesn't match --camera-postion=%s", id,
+                    position.getName()));
+            throw new ConfigurationException("--camera doesn't match --camera-position");
+        } else {
+            try {
+                String[] cameraIds = Workarounds.getCameraManager().getCameraIdList();
+                for (String cameraId : cameraIds) {
+                    if (position.matches(cameraId)) {
+                        return cameraId;
+                    }
+                }
+            } catch (CameraAccessException e) {
+                throw new ConfigurationException("Failed to query camera ID list", e);
+            }
+
+            Ln.e("--camera-postion doesn't match any camera");
+            throw new ConfigurationException("--camera-position doesn't match any camera");
+        }
+    }
+
+    private static boolean isHighSpeed(String id, int fps) throws ConfigurationException {
+        if (fps == 0) {
+            return false;
+        }
+
+        try {
+            CameraManager cameraManager = Workarounds.getCameraManager();
+            CameraCharacteristics characteristics = cameraManager.getCameraCharacteristics(id);
+
+            StreamConfigurationMap streamConfig = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+            assert streamConfig != null;
+            Range<Integer>[] lowFpsRanges = characteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES);
+            assert lowFpsRanges != null;
+
+            for (Range<Integer> range : lowFpsRanges) {
+                if (range.getUpper() == fps) {
+                    return false;
+                }
+            }
+
+            android.util.Size[] highFpsSizes = streamConfig.getHighSpeedVideoSizes();
+            for (android.util.Size size : highFpsSizes) {
+                Range<Integer>[] highFpsRanges = streamConfig.getHighSpeedVideoFpsRangesFor(size);
+
+                for (Range<Integer> range : highFpsRanges) {
+                    if (range.getUpper() == fps) {
+                        return true;
+                    }
+                }
+            }
+
+            throw new ConfigurationException("Camera does not support " + fps + " FPS");
+        } catch (CameraAccessException e) {
+            Ln.w("Failed to query supported FPS ranges", e);
+            return false;
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -95,13 +174,18 @@ public class CameraEncoder extends SurfaceEncoder {
         }
     }
 
-    @TargetApi(Build.VERSION_CODES.N)
+    @TargetApi(Build.VERSION_CODES.P)
     private CameraCaptureSession createCaptureSession(CameraDevice camera, Surface surface)
             throws CameraAccessException, InterruptedException {
         Ln.v("Create Capture Session");
 
+        int sessionType = isHighSpeed ? SessionConfiguration.SESSION_HIGH_SPEED
+                : SessionConfiguration.SESSION_REGULAR;
+        List<OutputConfiguration> outputs = Collections.singletonList(new OutputConfiguration(surface));
         CompletableFuture<CameraCaptureSession> future = new CompletableFuture<>();
-        camera.createCaptureSession(Collections.singletonList(surface), new CameraCaptureSession.StateCallback() {
+
+        SessionConfiguration config = new SessionConfiguration(
+                sessionType, outputs, cameraExecutor, new CameraCaptureSession.StateCallback() {
             @Override
             public void onConfigured(CameraCaptureSession session) {
                 Ln.v("Create Capture Session Success");
@@ -112,7 +196,9 @@ public class CameraEncoder extends SurfaceEncoder {
             public void onConfigureFailed(CameraCaptureSession session) {
                 future.completeExceptionally(new CameraAccessException(CameraAccessException.CAMERA_ERROR));
             }
-        }, cameraHandler);
+        });
+
+        camera.createCaptureSession(config);
 
         try {
             return future.get();
@@ -127,7 +213,7 @@ public class CameraEncoder extends SurfaceEncoder {
         Ln.v("Set Repeating Request");
 
         CompletableFuture<Void> future = new CompletableFuture<>();
-        session.setRepeatingRequest(request, new CameraCaptureSession.CaptureCallback() {
+        CameraCaptureSession.CaptureCallback callback = new CameraCaptureSession.CaptureCallback() {
             @Override
             public void onCaptureStarted(CameraCaptureSession session, CaptureRequest request,
                                          long timestamp, long frameNumber) {
@@ -139,7 +225,16 @@ public class CameraEncoder extends SurfaceEncoder {
                                         CaptureFailure failure) {
                 future.completeExceptionally(new CameraAccessException(CameraAccessException.CAMERA_ERROR));
             }
-        }, cameraHandler);
+        };
+
+        if (isHighSpeed) {
+            CameraConstrainedHighSpeedCaptureSession highSpeedSession =
+                    (CameraConstrainedHighSpeedCaptureSession) session;
+            List<CaptureRequest> requests = highSpeedSession.createHighSpeedRequestList(request);
+            highSpeedSession.setRepeatingBurst(requests, callback, cameraHandler);
+        } else {
+            session.setRepeatingRequest(request, callback, cameraHandler);
+        }
 
         try {
             future.get();
@@ -156,33 +251,26 @@ public class CameraEncoder extends SurfaceEncoder {
         }
     }
 
+    @TargetApi(Build.VERSION_CODES.N)
     @Override
     protected Size getSize() throws ConfigurationException {
         try {
-            if (cameraId != null) {
-                if (!cameraPosition.matches(cameraId)) {
-                    Ln.e(String.format("--camera=%s doesn't match --camera-postion=%s", cameraId,
-                            cameraPosition.getName()));
-                    throw new ConfigurationException("--camera doesn't match --camera-position");
-                }
-                actualCameraId = cameraId;
-            } else {
-                actualCameraId = null;
-                String[] cameraIds = Workarounds.getCameraManager().getCameraIdList();
-                for (String id : cameraIds) {
-                    if (cameraPosition.matches(id)) {
-                        actualCameraId = id;
-                        break;
-                    }
-                }
-                if (actualCameraId == null) {
-                    Ln.e("--camera-postion doesn't match any camera");
-                    throw new ConfigurationException("--camera-position doesn't match any camera");
+            if (maxSize > 0) {
+                if (cameraWidth > maxSize) {
+                    throw new ConfigurationException("--camera-width exceeds --max-size");
+                } else if (cameraHeight > maxSize) {
+                    throw new ConfigurationException("--camera-height exceeds --max-size");
                 }
             }
 
+            if (cameraWidth > 0 && cameraHeight > 0) {
+                return new Size(cameraWidth, cameraHeight);
+            }
+
+            // Otherwise, find a size smaller than the maximum that has the same aspect ratio as the
+            // sensor's native aspect ratio.
             CameraCharacteristics characteristics = Workarounds.getCameraManager()
-                    .getCameraCharacteristics(actualCameraId);
+                    .getCameraCharacteristics(cameraId);
             Rect sensorSize = characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
             float aspectRatio = (float) sensorSize.width() / sensorSize.height();
 
@@ -224,11 +312,17 @@ public class CameraEncoder extends SurfaceEncoder {
 
     private void setSurfaceInternal(Surface surface) throws CameraAccessException {
         try {
-            cameraDevice = openCamera(actualCameraId);
+            cameraDevice = openCamera(cameraId);
             CameraCaptureSession session = createCaptureSession(cameraDevice, surface);
             CaptureRequest.Builder requestBuilder = cameraDevice
                     .createCaptureRequest(CameraDevice.TEMPLATE_RECORD);
             requestBuilder.addTarget(surface);
+
+            if (cameraFps > 0) {
+                requestBuilder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+                        new Range<>(cameraFps, cameraFps));
+            }
+
             CaptureRequest request = requestBuilder.build();
             setRepeatingRequest(session, request);
         } catch (CameraAccessException e) {
@@ -251,6 +345,19 @@ public class CameraEncoder extends SurfaceEncoder {
     protected void dispose() {
         if (cameraDevice != null) {
             cameraDevice.close();
+        }
+    }
+
+    private static class HandlerExecutor implements Executor {
+        private final Handler handler;
+
+        public HandlerExecutor(Handler handler) {
+            this.handler = handler;
+        }
+
+        @Override
+        public void execute(Runnable command) {
+            handler.post(command);
         }
     }
 }

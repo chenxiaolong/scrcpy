@@ -45,6 +45,9 @@ struct sc_server_params {
     uint32_t display_id;
     const char *camera_id;
     enum sc_camera_position camera_position;
+    uint16_t camera_width;
+    uint16_t camera_height;
+    uint16_t camera_fps;
     bool video;
     bool audio;
     bool show_touches;
