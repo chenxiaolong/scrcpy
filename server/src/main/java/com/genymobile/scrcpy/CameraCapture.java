@@ -8,6 +8,7 @@ import android.graphics.Rect;
 import android.hardware.camera2.CameraAccessException;
 import android.hardware.camera2.CameraCaptureSession;
 import android.hardware.camera2.CameraCharacteristics;
+import android.hardware.camera2.CameraConstrainedHighSpeedCaptureSession;
 import android.hardware.camera2.CameraDevice;
 import android.hardware.camera2.CameraManager;
 import android.hardware.camera2.CaptureFailure;
@@ -19,11 +20,11 @@ import android.media.MediaCodec;
 import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.util.Range;
 import android.view.Surface;
 
 import java.io.IOException;
 import java.util.Arrays;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -39,8 +40,10 @@ public class CameraCapture extends SurfaceCapture {
     private final Size explicitSize;
     private int maxSize;
     private final CameraAspectRatio aspectRatio;
+    private final int fps;
 
     private String cameraId;
+    private boolean isHighSpeed;
     private Size size;
 
     private HandlerThread cameraThread;
@@ -50,12 +53,13 @@ public class CameraCapture extends SurfaceCapture {
 
     private final AtomicBoolean disconnected = new AtomicBoolean();
 
-    public CameraCapture(String explicitCameraId, CameraFacing cameraFacing, Size explicitSize, int maxSize, CameraAspectRatio aspectRatio) {
+    public CameraCapture(String explicitCameraId, CameraFacing cameraFacing, Size explicitSize, int maxSize, CameraAspectRatio aspectRatio, int fps) {
         this.explicitCameraId = explicitCameraId;
         this.cameraFacing = cameraFacing;
         this.explicitSize = explicitSize;
         this.maxSize = maxSize;
         this.aspectRatio = aspectRatio;
+        this.fps = fps;
     }
 
     @Override
@@ -71,7 +75,9 @@ public class CameraCapture extends SurfaceCapture {
                 throw new IOException("No matching camera found");
             }
 
-            size = selectSize(cameraId, explicitSize, maxSize, aspectRatio);
+            this.isHighSpeed = isHighSpeed(cameraId, fps);
+
+            size = selectSize(cameraId, explicitSize, maxSize, aspectRatio, isHighSpeed);
             if (size == null) {
                 throw new IOException("Could not select camera size");
             }
@@ -109,8 +115,46 @@ public class CameraCapture extends SurfaceCapture {
         return null;
     }
 
+    private static boolean isHighSpeed(String id, int fps) throws IOException {
+        if (fps == 0) {
+            return false;
+        }
+
+        try {
+            CameraManager cameraManager = ServiceManager.getCameraManager();
+            CameraCharacteristics characteristics = cameraManager.getCameraCharacteristics(id);
+
+            StreamConfigurationMap streamConfig = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+            assert streamConfig != null;
+            Range<Integer>[] lowFpsRanges = characteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES);
+            assert lowFpsRanges != null;
+
+            for (Range<Integer> range : lowFpsRanges) {
+                if (range.getUpper() == fps) {
+                    return false;
+                }
+            }
+
+            android.util.Size[] highFpsSizes = streamConfig.getHighSpeedVideoSizes();
+            for (android.util.Size size : highFpsSizes) {
+                Range<Integer>[] highFpsRanges = streamConfig.getHighSpeedVideoFpsRangesFor(size);
+
+                for (Range<Integer> range : highFpsRanges) {
+                    if (range.getUpper() == fps) {
+                        return true;
+                    }
+                }
+            }
+
+            throw new IOException("Camera does not support " + fps + " FPS");
+        } catch (CameraAccessException e) {
+            Ln.w("Failed to query supported FPS ranges", e);
+            return false;
+        }
+    }
+
     @TargetApi(Build.VERSION_CODES.N)
-    private static Size selectSize(String cameraId, Size explicitSize, int maxSize, CameraAspectRatio aspectRatio) throws CameraAccessException {
+    private static Size selectSize(String cameraId, Size explicitSize, int maxSize, CameraAspectRatio aspectRatio, boolean isHighSpeed) throws CameraAccessException {
         if (explicitSize != null) {
             return explicitSize;
         }
@@ -119,7 +163,9 @@ public class CameraCapture extends SurfaceCapture {
         CameraCharacteristics characteristics = cameraManager.getCameraCharacteristics(cameraId);
 
         StreamConfigurationMap configs = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
-        android.util.Size[] sizes = configs.getOutputSizes(MediaCodec.class);
+        android.util.Size[] sizes = isHighSpeed ? configs.getHighSpeedVideoSizes()
+                : configs.getOutputSizes(MediaCodec.class);
+
         Stream<android.util.Size> stream = Arrays.stream(sizes);
         if (maxSize > 0) {
             stream = stream.filter(it -> it.getWidth() <= maxSize && it.getHeight() <= maxSize);
@@ -188,6 +234,11 @@ public class CameraCapture extends SurfaceCapture {
             CameraCaptureSession session = createCaptureSession(cameraDevice, surface);
             CaptureRequest.Builder requestBuilder = cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_RECORD);
             requestBuilder.addTarget(surface);
+
+            if (fps > 0) {
+                requestBuilder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, new Range<>(fps, fps));
+            }
+
             CaptureRequest request = requestBuilder.build();
             setRepeatingRequest(session, request);
         } catch (CameraAccessException | InterruptedException e) {
@@ -218,7 +269,7 @@ public class CameraCapture extends SurfaceCapture {
 
         this.maxSize = maxSize;
         try {
-            size = selectSize(cameraId, null, maxSize, aspectRatio);
+            size = selectSize(cameraId, null, maxSize, aspectRatio, isHighSpeed);
             return true;
         } catch (CameraAccessException e) {
             Ln.w("Could not select camera size", e);
@@ -276,10 +327,12 @@ public class CameraCapture extends SurfaceCapture {
 
     @TargetApi(Build.VERSION_CODES.S)
     private CameraCaptureSession createCaptureSession(CameraDevice camera, Surface surface) throws CameraAccessException, InterruptedException {
+        int sessionType = isHighSpeed ? SessionConfiguration.SESSION_HIGH_SPEED
+                : SessionConfiguration.SESSION_REGULAR;
         CompletableFuture<CameraCaptureSession> future = new CompletableFuture<>();
         OutputConfiguration outputConfig = new OutputConfiguration(surface);
         List<OutputConfiguration> outputs = Arrays.asList(outputConfig);
-        SessionConfiguration sessionConfig = new SessionConfiguration(SessionConfiguration.SESSION_REGULAR, outputs, cameraExecutor,
+        SessionConfiguration sessionConfig = new SessionConfiguration(sessionType, outputs, cameraExecutor,
                 new CameraCaptureSession.StateCallback() {
                     @Override
                     public void onConfigured(CameraCaptureSession session) {
@@ -304,7 +357,7 @@ public class CameraCapture extends SurfaceCapture {
     @TargetApi(Build.VERSION_CODES.S)
     private void setRepeatingRequest(CameraCaptureSession session, CaptureRequest request) throws CameraAccessException, InterruptedException {
         CompletableFuture<Void> future = new CompletableFuture<>();
-        session.setRepeatingRequest(request, new CameraCaptureSession.CaptureCallback() {
+        CameraCaptureSession.CaptureCallback callback = new CameraCaptureSession.CaptureCallback() {
             @Override
             public void onCaptureStarted(CameraCaptureSession session, CaptureRequest request, long timestamp, long frameNumber) {
                 future.complete(null);
@@ -314,7 +367,16 @@ public class CameraCapture extends SurfaceCapture {
             public void onCaptureFailed(CameraCaptureSession session, CaptureRequest request, CaptureFailure failure) {
                 future.completeExceptionally(new CameraAccessException(CameraAccessException.CAMERA_ERROR));
             }
-        }, cameraHandler);
+        };
+
+        if (isHighSpeed) {
+            CameraConstrainedHighSpeedCaptureSession highSpeedSession =
+                    (CameraConstrainedHighSpeedCaptureSession) session;
+            List<CaptureRequest> requests = highSpeedSession.createHighSpeedRequestList(request);
+            highSpeedSession.setRepeatingBurst(requests, callback, cameraHandler);
+        } else {
+            session.setRepeatingRequest(request, callback, cameraHandler);
+        }
 
         try {
             future.get();

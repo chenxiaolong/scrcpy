@@ -9,8 +9,10 @@ import android.hardware.camera2.CameraCharacteristics;
 import android.hardware.camera2.CameraManager;
 import android.hardware.camera2.params.StreamConfigurationMap;
 import android.media.MediaCodec;
+import android.util.Range;
 
 import java.util.List;
+import java.util.TreeSet;
 
 public final class LogUtils {
 
@@ -99,11 +101,32 @@ public final class LogUtils {
                     builder.append(activeSize.width()).append("x").append(activeSize.height());
                     builder.append(')');
 
+                    // Capture frame rates for low-FPS mode are the same for every resolution.
+                    Range<Integer>[] lowFpsRanges = characteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES);
+                    TreeSet<Integer> uniqueLowFps = new TreeSet<>();
+                    for (Range<Integer> range : lowFpsRanges) {
+                        uniqueLowFps.add(range.getUpper());
+                    }
+                    builder.append(" (FPS: ").append(uniqueLowFps).append(')');
+
                     if (includeSizes) {
                         StreamConfigurationMap configs = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
                         android.util.Size[] sizes = configs.getOutputSizes(MediaCodec.class);
+                        android.util.Size[] hfrSizes = configs.getHighSpeedVideoSizes();
                         for (android.util.Size size : sizes) {
                             builder.append("\n        - ").append(size.getWidth()).append('x').append(size.getHeight());
+
+                            // Frame rates for high-FPS mode are different based on resolution.
+                            // Linear search is fast enough (0-2 items on most devices).
+                            for (android.util.Size hfrSize : hfrSizes) {
+                                if (hfrSize.equals(size)) {
+                                    TreeSet<Integer> uniqueFps = new TreeSet<>();
+                                    for (Range<Integer> fps : configs.getHighSpeedVideoFpsRangesFor(hfrSize)) {
+                                        uniqueFps.add(fps.getUpper());
+                                    }
+                                    builder.append(" (High FPS: ").append(uniqueFps).append(')');
+                                }
+                            }
                         }
                     }
                 }
