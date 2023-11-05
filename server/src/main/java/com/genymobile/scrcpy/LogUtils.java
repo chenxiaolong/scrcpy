@@ -117,27 +117,12 @@ public final class LogUtils {
                         for (String phyId : characteristics.getPhysicalCameraIds()) {
                             CameraCharacteristics phyCharacteristics = cameraManager.getCameraCharacteristics(phyId);
                             appendPhysicalCamera(builder, phyId, phyCharacteristics);
-                        }
-                    }
-
-                    if (includeSizes) {
-                        StreamConfigurationMap configs = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
-
-                        android.util.Size[] sizes = configs.getOutputSizes(MediaCodec.class);
-                        for (android.util.Size size : sizes) {
-                            builder.append("\n        - ").append(size.getWidth()).append('x').append(size.getHeight());
-                        }
-
-                        android.util.Size[] highSpeedSizes = configs.getHighSpeedVideoSizes();
-                        if (highSpeedSizes.length > 0) {
-                            builder.append("\n      High speed capture (--camera-high-speed):");
-                            for (android.util.Size size : highSpeedSizes) {
-                                Range<Integer>[] highFpsRanges = configs.getHighSpeedVideoFpsRanges();
-                                SortedSet<Integer> uniqueHighFps = getUniqueSet(highFpsRanges);
-                                builder.append("\n        - ").append(size.getWidth()).append("x").append(size.getHeight());
-                                builder.append(" (fps=").append(uniqueHighFps).append(')');
+                            if (includeSizes) {
+                                appendSizes(builder, phyCharacteristics);
                             }
                         }
+                    } else if (includeSizes) {
+                        appendSizes(builder, characteristics);
                     }
                 }
             }
@@ -162,6 +147,26 @@ public final class LogUtils {
 
         Rect activeSize = characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
         builder.append(activeSize.width()).append("x").append(activeSize.height()).append(")");
+    }
+
+    private static void appendSizes(StringBuilder builder, CameraCharacteristics characteristics) {
+        StreamConfigurationMap configs = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+
+        android.util.Size[] sizes = configs.getOutputSizes(MediaCodec.class);
+        for (android.util.Size size : sizes) {
+            builder.append("\n                - ").append(size.getWidth()).append('x').append(size.getHeight());
+        }
+
+        android.util.Size[] highSpeedSizes = configs.getHighSpeedVideoSizes();
+        if (highSpeedSizes.length > 0) {
+            builder.append("\n              High speed capture (--camera-high-speed):");
+            for (android.util.Size size : highSpeedSizes) {
+                Range<Integer>[] highFpsRanges = configs.getHighSpeedVideoFpsRanges();
+                SortedSet<Integer> uniqueHighFps = getUniqueSet(highFpsRanges);
+                builder.append("\n                - ").append(size.getWidth()).append("x").append(size.getHeight());
+                builder.append(" (fps=").append(uniqueHighFps).append(')');
+            }
+        }
     }
 
     private static SortedSet<Integer> getUniqueSet(Range<Integer>[] ranges) {
