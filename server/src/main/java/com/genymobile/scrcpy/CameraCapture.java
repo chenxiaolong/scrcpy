@@ -20,6 +20,7 @@ import android.media.MediaCodec;
 import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.util.Pair;
 import android.util.Range;
 import android.view.Surface;
 
@@ -43,7 +44,8 @@ public class CameraCapture extends SurfaceCapture {
     private final int fps;
     private final boolean highSpeed;
 
-    private String cameraId;
+    private String logicalCameraId;
+    private String physicalCameraId;
     private Size size;
 
     private HandlerThread cameraThread;
@@ -72,34 +74,59 @@ public class CameraCapture extends SurfaceCapture {
         cameraExecutor = new HandlerExecutor(cameraHandler);
 
         try {
-            cameraId = selectCamera(explicitCameraId, cameraFacing);
-            if (cameraId == null) {
+            Pair<String, String> cameraIdPair = selectCamera(explicitCameraId, cameraFacing);
+            logicalCameraId = cameraIdPair.first;
+            physicalCameraId = cameraIdPair.second;
+            if (logicalCameraId == null) {
                 throw new IOException("No matching camera found");
             }
 
-            size = selectSize(cameraId, explicitSize, maxSize, aspectRatio, highSpeed);
+            // Size can be queried against the physical camera.
+            size = selectSize(physicalCameraId != null ? physicalCameraId : logicalCameraId,
+                    explicitSize, maxSize, aspectRatio, highSpeed);
             if (size == null) {
                 throw new IOException("Could not select camera size");
             }
 
-            Ln.i("Using camera '" + cameraId + "'");
-            cameraDevice = openCamera(cameraId);
+            // But the camera must be opened with a logical camera.
+            Ln.i("Using camera: logical=" + logicalCameraId + ", physical=" + physicalCameraId);
+            cameraDevice = openCamera(logicalCameraId);
         } catch (CameraAccessException | InterruptedException e) {
             throw new IOException(e);
         }
     }
 
-    private static String selectCamera(String explicitCameraId, CameraFacing cameraFacing) throws CameraAccessException {
+    private static Pair<String, String> selectCamera(String explicitCameraId, CameraFacing cameraFacing) throws CameraAccessException {
+        CameraManager cameraManager = ServiceManager.getCameraManager();
+        String[] cameraIds = cameraManager.getCameraIdList();
+
         if (explicitCameraId != null) {
-            return explicitCameraId;
+            // The explicit camera ID could be a logical or physical camera.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                for (String cameraId : cameraIds) {
+                    if (cameraId.equals(explicitCameraId)) {
+                        break;
+                    }
+
+                    CameraCharacteristics characteristics = cameraManager.getCameraCharacteristics(cameraId);
+                    int[] capabilities = characteristics.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES);
+                    if (LogUtils.contains(capabilities, CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA)) {
+                        for (String phyCameraId : characteristics.getPhysicalCameraIds()) {
+                            if (phyCameraId.equals(explicitCameraId)) {
+                                return new Pair(cameraId, phyCameraId);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Assume it's a logical camera ID.
+            return new Pair(explicitCameraId, null);
         }
 
-        CameraManager cameraManager = ServiceManager.getCameraManager();
-
-        String[] cameraIds = cameraManager.getCameraIdList();
         if (cameraFacing == null) {
             // Use the first one
-            return cameraIds.length > 0 ? cameraIds[0] : null;
+            return new Pair(cameraIds.length > 0 ? cameraIds[0] : null, null);
         }
 
         for (String cameraId : cameraIds) {
@@ -107,7 +134,7 @@ public class CameraCapture extends SurfaceCapture {
 
             int facing = characteristics.get(CameraCharacteristics.LENS_FACING);
             if (cameraFacing.value() == facing) {
-                return cameraId;
+                return new Pair(cameraId, null);
             }
         }
 
@@ -226,7 +253,8 @@ public class CameraCapture extends SurfaceCapture {
 
         this.maxSize = maxSize;
         try {
-            size = selectSize(cameraId, null, maxSize, aspectRatio, highSpeed);
+            size = selectSize(physicalCameraId != null ? physicalCameraId : logicalCameraId,
+                    null, maxSize, aspectRatio, highSpeed);
             return size != null;
         } catch (CameraAccessException e) {
             Ln.w("Could not select camera size", e);
@@ -286,6 +314,11 @@ public class CameraCapture extends SurfaceCapture {
     private CameraCaptureSession createCaptureSession(CameraDevice camera, Surface surface) throws CameraAccessException, InterruptedException {
         CompletableFuture<CameraCaptureSession> future = new CompletableFuture<>();
         OutputConfiguration outputConfig = new OutputConfiguration(surface);
+
+        if (physicalCameraId != null) {
+            outputConfig.setPhysicalCameraId(physicalCameraId);
+        }
+
         List<OutputConfiguration> outputs = Arrays.asList(outputConfig);
 
         int sessionType = highSpeed ? SessionConfiguration.SESSION_HIGH_SPEED : SessionConfiguration.SESSION_REGULAR;

@@ -132,7 +132,7 @@ public final class LogUtils {
         return builder.toString();
     }
 
-    private static boolean contains(int[] array, int value) {
+    static boolean contains(int[] array, int value) {
         for (int i : array) {
             if (i == value) {
                 return true;
